@@ -71,4 +71,10 @@ rm uniswap-surveillance-metric-v1.zip
 
 ## Calculate the metrics
 
+To run the code that populates the dataframes that we later run analyses on, run
+
+```bash
+python -m surveillance_metric.computation_scripts.calculate_surveillance_metric
+```
+
 ## Run the analyses on the metrics
