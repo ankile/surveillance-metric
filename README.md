@@ -25,7 +25,7 @@ Preferably, activate a virtual environment before installing anything, you can u
 ```bash
 python -m venv venv
 source venv/bin/activate
-``
+```
 
 Now install the simulator code
 
@@ -42,6 +42,31 @@ pip install -e .
 
 ## Data
 
+
+### Raw data
+
+We have aggregated raw data from different sources to enable the analyses herein. Most of the Uniswap data is from the service Allium, MEV Boost data is from an open repo: .
+
+To download the raw data, run the following commands in the root of the repository (planning to add the opportunity to specify a different path if that's nice to have)
+
+```bash
+curl -O https://surveillance-metric.s3.amazonaws.com/uniswap-raw-data.zip
+unzip uniswap-raw-data.zip
+rm uniswap-raw-data.zip
+```
+
+This is the necessary data to be able to run the code that calculates the metric over the blockchain data. If you only want to look at the result after running the analyses, download the following data as well.
+
+
+### Metric calculation data
+
+_NOTE: This file does not exist yet!_
+
+```bash
+curl -O https://surveillance-metric.s3.amazonaws.com/uniswap-surveillance-metric-v1.zip
+unzip uniswap-surveillance-metric-v1.zip
+rm uniswap-surveillance-metric-v1.zip
+```
 
 
 ## Calculate the metrics
