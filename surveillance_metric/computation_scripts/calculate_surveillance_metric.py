@@ -46,7 +46,6 @@ state.PACKAGEDIR = ROOT_PATH
 
 
 print(f"Using data path: {DATA_PATH}")
-DOWNLOAD_DATA = True
 
 
 @dataclass
@@ -260,7 +259,22 @@ def get_pool_block_pairs(
         )
 
     # Apply ordering, limit, and offset
-    query = query.sort(["address", "block_number"]).slice(offset, limit)
+    # query = query.sort(["address", "block_number"]).slice(offset, limit)
+
+    # Count unique block numbers for each address
+    address_block_counts = query.group_by("address").agg(
+        pl.col("block_number").n_unique().alias("unique_block_count")
+    )
+
+    # Join the counts back to the original query
+    query = query.join(address_block_counts, on="address", how="left")
+
+    # Apply ordering (by unique block count descending, then address, then block number),
+    # limit, and offset
+    query = query.sort(
+        ["unique_block_count", "address", "block_number"],
+        descending=[True, False, False],
+    ).slice(offset, limit)
 
     # Collect the results
     return query.collect()
@@ -282,7 +296,9 @@ def get_pool(address, update=False):
     )
 
 
-def do_swap(swap: dict, curr_price: float, pool: v3Pool, token_info: dict) -> float:
+def do_swap(
+    swap: dict, curr_sqrt_price_x96: float, pool: v3Pool, token_info: dict
+) -> float:
     # bp()
     token_in = (
         token_info["token0"] if float(swap["amount0"]) > 0 else token_info["token1"]
@@ -297,11 +313,13 @@ def do_swap(swap: dict, curr_price: float, pool: v3Pool, token_info: dict) -> fl
             "swapIn": input_amount,
             "as_of": swap["block_number"],
             "fees": True,
-            "providedPrice": curr_price,
+            "providedPrice": curr_sqrt_price_x96,
         }
     )
 
-    return sqrt_price_next * 2**96
+    sqrt_price_next_x96 = sqrt_price_next * 2**96
+
+    return sqrt_price_next_x96
 
 
 def get_pool_block_count(*, only_unprocessed: bool) -> int:
@@ -365,14 +383,17 @@ def run_swap_order(
 ):
     prices = []
     ordering = []
-    curr_price_sqrt: float = pool.getPriceAt(block_number)
+    curr_price_sqrt_x96: float = pool.getPriceAt(block_number)
+    # curr_price_sqrt = curr_price_sqrt_x96 / 2**96
 
     for swap in swaps:
-        sqrt_price_next = do_swap(swap, curr_price_sqrt, pool, token_info)
+        sqrt_price_next_x96 = do_swap(swap, curr_price_sqrt_x96, pool, token_info)
+        sqrt_price_next = sqrt_price_next_x96 / 2**96
 
         prices.append(get_price(sqrt_price_next, token_info))
         ordering.append(f"{swap['transaction_index']:03}_{swap['log_index']:03}")
-        curr_price_sqrt = sqrt_price_next
+        # curr_price_sqrt = sqrt_price_next
+        curr_price_sqrt_x96 = sqrt_price_next_x96
 
     return prices, ordering
 
@@ -384,6 +405,7 @@ def realized_measurement(
     blockpool_metric: BlockPoolMetrics,
     token_info: Dict[str, Any],
 ):
+
     # Convert Polars DataFrame to an iterator of named tuples
     swap_iterator: Iterator[dict] = swaps.iter_rows(named=True)
 
@@ -582,12 +604,22 @@ def run_metrics(
     successes = 0
     buffer = []
 
-    for (pool_addr,), group in pool_block_pairs.group_by(
-        "address", maintain_order=True
+    for i, ((pool_addr,), group) in enumerate(
+        pool_block_pairs.group_by("address", maintain_order=True)
     ):
+
+        # if i < 400:
+        #     continue
+
+        # if i >= 500:
+        #     print(f"I'm done after {i} pools")
+        #     break
+
         it.set_description(
             f"[{process_id}] ({offset}-{offset+limit}) Processing pool {pool_addr}"
         )
+
+        # bp()
 
         if pool_addr not in all_token_info:
             continue
@@ -595,7 +627,11 @@ def run_metrics(
         # Reuse the same pool object if the address is the same
         try:
             if pool is None or pool_addr != pool.pool:
+                print(f"Downloading pool data for {pool_addr}, index {i}")
                 pool = get_pool(pool_addr, update=pull_latest_data)
+
+            # # Just so we can download all the data, we'll continue without doing any calculations
+            # continue
 
             min_block, max_block = get_min_max_block(group)
             swaps_for_pool = get_swaps_for_address(
@@ -604,7 +640,8 @@ def run_metrics(
 
             token_info = all_token_info[pool_addr]
 
-            for block_number in group["block_number"].unique():
+            # for block_number in group["block_number"].unique():
+            for block_number in swaps_for_pool["block_number"].unique():
                 block_number = int(block_number)
                 it.set_postfix(errors=errors, successes=successes)
                 it.update(1)
@@ -613,10 +650,16 @@ def run_metrics(
                     pl.col("block_number") == block_number
                 ).sort("transaction_index")
 
+                # bp()
+
                 if swaps.height == 0:
                     continue
 
-                curr_price_sqrt = pool.getPriceAt(block_number)
+                # This is sqrt_price_x96 format
+                curr_price_sqrt_x96 = pool.getPriceAt(block_number)
+                curr_price_sqrt = curr_price_sqrt_x96 / 2**96
+
+                # bp()
 
                 blockpool_metric = BlockPoolMetrics(
                     block_number=block_number,
@@ -704,7 +747,7 @@ if __name__ == "__main__":
             all_token_info=token_info,
             mev_boost_values=mev_boost_values,
             only_unprocessed=only_unprocessed,
-            pull_latest_data=DOWNLOAD_DATA,
+            pull_latest_data=True,
             reraise_exceptions=False,  # Set to True to debug
         )
 
