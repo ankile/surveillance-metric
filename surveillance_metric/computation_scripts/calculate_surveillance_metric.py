@@ -15,7 +15,7 @@ from typing import Dict, Any, Iterator
 from datetime import datetime
 from itertools import permutations
 from multiprocessing import Pool, Lock
-from typing import Iterable, cast
+from typing import cast
 
 from v3.state import v3Pool
 from tqdm import tqdm
@@ -34,10 +34,21 @@ from datetime import datetime
 import polars as pl
 
 
-load_dotenv()
+# load_dotenv()
 
 
-DATA_PATH = Path(os.environ["DATA_PATH"])
+# DATA_PATH = Path(os.environ["DATA_PATH"])
+# Define this relative to the path of this file
+ROOT_PATH = Path(__file__).parent.parent.parent.absolute()
+DATA_PATH = ROOT_PATH / "data"
+
+from v3 import state
+
+state.PACKAGEDIR = ROOT_PATH
+
+
+print(f"Using data path: {DATA_PATH}")
+DOWNLOAD_DATA = False
 
 
 @dataclass
@@ -119,10 +130,18 @@ class BlockPoolMetrics:
         return pl.DataFrame(
             {
                 **{k: [v] for k, v in data.items() if not isinstance(v, list)},
-                "realized_order": [pl.Series(self.realized_order, dtype=pl.List(pl.Utf8))],
-                "realized_prices": [pl.Series(self.realized_prices, dtype=pl.List(pl.Float64))],
-                "volume_heur_order": [pl.Series(self.volume_heur_order, dtype=pl.List(pl.Utf8))],
-                "volume_heur_prices": [pl.Series(self.volume_heur_prices, dtype=pl.List(pl.Float64))],
+                "realized_order": [
+                    pl.Series(self.realized_order, dtype=pl.List(pl.Utf8))
+                ],
+                "realized_prices": [
+                    pl.Series(self.realized_prices, dtype=pl.List(pl.Float64))
+                ],
+                "volume_heur_order": [
+                    pl.Series(self.volume_heur_order, dtype=pl.List(pl.Utf8))
+                ],
+                "volume_heur_prices": [
+                    pl.Series(self.volume_heur_prices, dtype=pl.List(pl.Float64))
+                ],
             }
         )
 
@@ -132,13 +151,16 @@ class Swap:
     amount1: str
     block_number: int
 
+
 def get_swaps_for_address(address: str, min_block: int, max_block: int) -> pl.DataFrame:
     # Create a lazy frame from all parquet files
     df = pl.scan_parquet(DATA_PATH / "pool_swap_events" / "*.parquet")
 
     # Apply filters
     filtered_df = df.filter(
-        (pl.col("block_number") >= min_block) & (pl.col("block_number") <= max_block) & (pl.col("address") == address)
+        (pl.col("block_number") >= min_block)
+        & (pl.col("block_number") <= max_block)
+        & (pl.col("address") == address)
     )
 
     # Collect and return the result
@@ -151,12 +173,21 @@ def get_token_info() -> Dict[str, Dict[str, Any]]:
 
     # Select the required columns
     token_info = df.select(
-        [pl.col("pool"), pl.col("token0"), pl.col("token1"), pl.col("decimals0"), pl.col("decimals1")]
+        [
+            pl.col("pool"),
+            pl.col("token0"),
+            pl.col("token1"),
+            pl.col("decimals0"),
+            pl.col("decimals1"),
+        ]
     )
 
     # Use struct to group the columns we want as a nested dictionary
     result = token_info.select(
-        [pl.col("pool"), pl.struct(["token0", "token1", "decimals0", "decimals1"]).alias("info")]
+        [
+            pl.col("pool"),
+            pl.struct(["token0", "token1", "decimals0", "decimals1"]).alias("info"),
+        ]
     )
 
     result = result.collect().to_dict(as_series=False)
@@ -178,12 +209,16 @@ def get_mev_boost_values() -> dict[int, float]:
     df = df.select(["block_number", "mevboost_value"])
 
     # Convert to dictionary
-    mev_boost_values = dict(zip(df["block_number"].to_list(), df["mevboost_value"].to_list()))
+    mev_boost_values = dict(
+        zip(df["block_number"].to_list(), df["mevboost_value"].to_list())
+    )
 
     return mev_boost_values
 
 
-def get_pool_block_pairs(*, limit: int, offset: int, only_unprocessed: bool) -> pl.DataFrame:
+def get_pool_block_pairs(
+    *, limit: int, offset: int, only_unprocessed: bool
+) -> pl.DataFrame:
     # Load DataFrames lazily
     swap_counts = pl.scan_parquet(DATA_PATH / "swap_counts.parquet")
     token_info = pl.scan_parquet(DATA_PATH / "pool_token_info.parquet")
@@ -200,9 +235,13 @@ def get_pool_block_pairs(*, limit: int, offset: int, only_unprocessed: bool) -> 
 
     # Start building the query
     query = (
-        swap_counts.filter((pl.col("block_number") >= 15537940) & (pl.col("block_number") <= 17959956))
+        swap_counts.filter(
+            (pl.col("block_number") >= 15537940) & (pl.col("block_number") <= 17959956)
+        )
         .join(
-            token_info.filter(pl.col("decimals0").is_not_null() & pl.col("decimals1").is_not_null()),
+            token_info.filter(
+                pl.col("decimals0").is_not_null() & pl.col("decimals1").is_not_null()
+            ),
             left_on="address",
             right_on="pool",
         )
@@ -230,7 +269,9 @@ def get_pool_block_pairs(*, limit: int, offset: int, only_unprocessed: bool) -> 
 
 def get_price(sqrt_price: float, token_info: dict):
     # `token_info` is a dictionary with the info for the specific pool in question
-    return 1 / (sqrt_price**2) / 10 ** (token_info["decimals0"] - token_info["decimals1"])
+    return (
+        1 / (sqrt_price**2) / 10 ** (token_info["decimals0"] - token_info["decimals1"])
+    )
 
 
 def get_pool(address, update=False):
@@ -244,8 +285,12 @@ def get_pool(address, update=False):
 
 def do_swap(swap: dict, curr_price: float, pool: v3Pool, token_info: dict) -> float:
     # bp()
-    token_in = token_info["token0"] if float(swap["amount0"]) > 0 else token_info["token1"]
-    input_amount = float(swap["amount0"]) if float(swap["amount0"]) > 0 else float(swap["amount1"])
+    token_in = (
+        token_info["token0"] if float(swap["amount0"]) > 0 else token_info["token1"]
+    )
+    input_amount = (
+        float(swap["amount0"]) if float(swap["amount0"]) > 0 else float(swap["amount1"])
+    )
 
     _, (sqrt_price_next, _, _) = pool.swapIn(
         {
@@ -253,7 +298,7 @@ def do_swap(swap: dict, curr_price: float, pool: v3Pool, token_info: dict) -> fl
             "swapIn": input_amount,
             "as_of": swap["block_number"],
             "fees": True,
-            "givenPrice": curr_price,
+            "providedPrice": curr_price * 2**96,
         }
     )
 
@@ -274,8 +319,12 @@ def get_pool_block_count(*, only_unprocessed: bool) -> int:
         print("block_pool_metrics.parquet not found. Proceeding without it.")
 
     # Start building the query
-    query = swap_counts.filter((pl.col("block_number") >= 15537940) & (pl.col("block_number") <= 17959956)).join(
-        token_info.filter(pl.col("decimals0").is_not_null() & pl.col("decimals1").is_not_null()),
+    query = swap_counts.filter(
+        (pl.col("block_number") >= 15537940) & (pl.col("block_number") <= 17959956)
+    ).join(
+        token_info.filter(
+            pl.col("decimals0").is_not_null() & pl.col("decimals1").is_not_null()
+        ),
         left_on="address",
         right_on="pool",
     )
@@ -309,7 +358,9 @@ def set_metrics(blockpool_metric, field: str, prices: list, ordering: list):
     setattr(blockpool_metric, f"{field}_linf", norm(prices_np, ord=np.inf))  # type: ignore
 
 
-def run_swap_order(pool: v3Pool, swaps: Iterator[dict], block_number: int, token_info: dict):
+def run_swap_order(
+    pool: v3Pool, swaps: Iterator[dict], block_number: int, token_info: dict
+):
     prices = []
     ordering = []
     curr_price_sqrt: float = pool.getPriceAt(block_number)
@@ -325,11 +376,14 @@ def run_swap_order(pool: v3Pool, swaps: Iterator[dict], block_number: int, token
 
 
 def realized_measurement(
-    pool: v3Pool, swaps: pl.DataFrame, block_number: int, blockpool_metric: BlockPoolMetrics, token_info: Dict[str, Any]
+    pool: v3Pool,
+    swaps: pl.DataFrame,
+    block_number: int,
+    blockpool_metric: BlockPoolMetrics,
+    token_info: Dict[str, Any],
 ):
     # Convert Polars DataFrame to an iterator of named tuples
     swap_iterator: Iterator[dict] = swaps.iter_rows(named=True)
-
 
     # Run the realized measurement
     prices, ordering = run_swap_order(pool, swap_iterator, block_number, token_info)
@@ -338,7 +392,11 @@ def realized_measurement(
 
 
 def volume_heuristic(
-    pool: v3Pool, swaps: pl.DataFrame, block_number: int, blockpool_metric: BlockPoolMetrics, token_info: Dict[str, Any]
+    pool: v3Pool,
+    swaps: pl.DataFrame,
+    block_number: int,
+    blockpool_metric: BlockPoolMetrics,
+    token_info: Dict[str, Any],
 ):
     pool_addr = blockpool_metric.pool_address
     baseline_price = blockpool_metric.baseline_price
@@ -363,10 +421,18 @@ def volume_heuristic(
     sell_df = swaps.filter(pl.col("amount0").str.starts_with("-"))
 
     # Order buys by volume descending
-    buys = buy_df.sort("amount0_float", descending=True).to_dicts() if buy_df.height > 0 else []
+    buys = (
+        buy_df.sort("amount0_float", descending=True).to_dicts()
+        if buy_df.height > 0
+        else []
+    )
 
     # Order sells by volume descending
-    sells = sell_df.sort("amount1_float", descending=True).to_dicts() if sell_df.height > 0 else []
+    sells = (
+        sell_df.sort("amount1_float", descending=True).to_dicts()
+        if sell_df.height > 0
+        else []
+    )
 
     # While we're still in the core
     while len(buys) > 0 and len(sells) > 0:
@@ -374,11 +440,15 @@ def volume_heuristic(
             # If we're at the baseline price, we can swap in either direction
             # Choose the one that moves the price the least
             buy_diff = (
-                get_price(do_swap(buys[-1], curr_price_sqrt, pool, token_info), token_info)
+                get_price(
+                    do_swap(buys[-1], curr_price_sqrt, pool, token_info), token_info
+                )
                 - baseline_price
             )
             sell_diff = (
-                get_price(do_swap(sells[-1], curr_price_sqrt, pool, token_info), token_info)
+                get_price(
+                    do_swap(sells[-1], curr_price_sqrt, pool, token_info), token_info
+                )
                 - baseline_price
             )
 
@@ -416,22 +486,32 @@ def volume_heuristic(
 
 
 def tstar(
-    pool: v3Pool, swaps: pl.DataFrame, block_number: int, blockpool_metric: BlockPoolMetrics, token_info: Dict[str, Any]
+    pool: v3Pool,
+    swaps: pl.DataFrame,
+    block_number: int,
+    blockpool_metric: BlockPoolMetrics,
+    token_info: Dict[str, Any],
 ):
     # Run the t* measurement if not more than 7 swaps
     if swaps.height > 7:
         return
 
-    # Convert 
+    # Convert
     swaps_list = swaps.iter_rows(named=True)
 
     for swap_perm in permutations(swaps_list):
         prices, _ = run_swap_order(pool, swap_perm, block_number, token_info)
         prices_array = np.array(prices) - blockpool_metric.baseline_price
 
-        blockpool_metric.tstar_l1 = min(blockpool_metric.tstar_l1, norm(prices_array, ord=1))
-        blockpool_metric.tstar_l2 = min(blockpool_metric.tstar_l2, norm(prices_array, ord=2))
-        blockpool_metric.tstar_linf = min(blockpool_metric.tstar_linf, norm(prices_array, ord=np.inf))
+        blockpool_metric.tstar_l1 = min(
+            blockpool_metric.tstar_l1, norm(prices_array, ord=1)
+        )
+        blockpool_metric.tstar_l2 = min(
+            blockpool_metric.tstar_l2, norm(prices_array, ord=2)
+        )
+        blockpool_metric.tstar_linf = min(
+            blockpool_metric.tstar_linf, norm(prices_array, ord=np.inf)
+        )
 
 
 def copy_over(blockpool_metric: BlockPoolMetrics, to: list[str]):
@@ -478,10 +558,20 @@ def run_metrics(
             df.write_parquet(output_file)
             buffer = []
 
-    output_file = DATA_PATH / "pool_block_metrics" / f"block_pool_metrics_{offset}-{offset+limit}.parquet"
-    pool_block_pairs: pl.DataFrame = get_pool_block_pairs(limit=limit, offset=offset, only_unprocessed=only_unprocessed)
+    output_file = (
+        DATA_PATH
+        / "pool_block_metrics"
+        / f"block_pool_metrics_{offset}-{offset+limit}.parquet"
+    )
+    pool_block_pairs: pl.DataFrame = get_pool_block_pairs(
+        limit=limit, offset=offset, only_unprocessed=only_unprocessed
+    )
 
-    it = tqdm(total=pool_block_pairs.height, position=process_id, desc=f"[{process_id}] ({offset}-{offset+limit})")
+    it = tqdm(
+        total=pool_block_pairs.height,
+        position=process_id,
+        desc=f"[{process_id}] ({offset}-{offset+limit})",
+    )
     pool = None
 
     program_start = datetime.now()
@@ -490,8 +580,12 @@ def run_metrics(
     successes = 0
     buffer = []
 
-    for (pool_addr, ), group in pool_block_pairs.group_by("address", maintain_order=True):
-        it.set_description(f"[{process_id}] ({offset}-{offset+limit}) Processing pool {pool_addr}")
+    for (pool_addr,), group in pool_block_pairs.group_by(
+        "address", maintain_order=True
+    ):
+        it.set_description(
+            f"[{process_id}] ({offset}-{offset+limit}) Processing pool {pool_addr}"
+        )
 
         if pool_addr not in all_token_info:
             continue
@@ -502,7 +596,9 @@ def run_metrics(
                 pool = get_pool(pool_addr, update=pull_latest_data)
 
             min_block, max_block = get_min_max_block(group)
-            swaps_for_pool = get_swaps_for_address(pool_addr, min_block=min_block, max_block=max_block)
+            swaps_for_pool = get_swaps_for_address(
+                pool_addr, min_block=min_block, max_block=max_block
+            )
 
             token_info = all_token_info[pool_addr]
 
@@ -511,7 +607,9 @@ def run_metrics(
                 it.set_postfix(errors=errors, successes=successes)
                 it.update(1)
 
-                swaps = swaps_for_pool.filter(pl.col("block_number") == block_number).sort("transaction_index")
+                swaps = swaps_for_pool.filter(
+                    pl.col("block_number") == block_number
+                ).sort("transaction_index")
 
                 if swaps.height == 0:
                     continue
@@ -529,10 +627,14 @@ def run_metrics(
                     baseline_price=get_price(curr_price_sqrt, token_info),
                 )
 
-                realized_measurement(pool, swaps, block_number, blockpool_metric, token_info)
+                realized_measurement(
+                    pool, swaps, block_number, blockpool_metric, token_info
+                )
 
                 if swaps.height > 1:
-                    volume_heuristic(pool, swaps, block_number, blockpool_metric, token_info)
+                    volume_heuristic(
+                        pool, swaps, block_number, blockpool_metric, token_info
+                    )
                     tstar(pool, swaps, block_number, blockpool_metric, token_info)
                 else:
                     copy_over(blockpool_metric, to=["volume_heur", "tstar"])
@@ -550,7 +652,9 @@ def run_metrics(
                 raise e
             errors += 1
             with open(f"output/error-{program_start}.log", "a") as f:
-                f.write(f"Error processing block {block_number} for pool {pool_addr}: {e}\n")
+                f.write(
+                    f"Error processing block {block_number} for pool {pool_addr}: {e}\n"
+                )
             continue
 
     # Write any remaining rows in the buffer
@@ -559,7 +663,7 @@ def run_metrics(
 
 
 if __name__ == "__main__":
-    from dotenv import load_dotenv
+    # from dotenv import load_dotenv
 
     load_dotenv()
 
@@ -567,7 +671,7 @@ if __name__ == "__main__":
     parser.add_argument("--n-cpus", type=int, default=1, help="Number of CPUs to use")
     args = parser.parse_args()
 
-    only_unprocessed = True
+    only_unprocessed = False
 
     print(f"Starting MEV Boost Data Metric Calculations with {args.n_cpus} CPUs")
 
@@ -594,8 +698,8 @@ if __name__ == "__main__":
             all_token_info=token_info,
             mev_boost_values=mev_boost_values,
             only_unprocessed=only_unprocessed,
-            pull_latest_data=True,
-            reraise_exceptions=False,  # Set to True to debug
+            pull_latest_data=DOWNLOAD_DATA,
+            reraise_exceptions=True,  # Set to True to debug
         )
 
     if n_processes == 1:
