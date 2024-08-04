@@ -1,3 +1,4 @@
+from glob import glob
 import math
 import os
 from pathlib import Path
@@ -34,9 +35,6 @@ from datetime import datetime
 import polars as pl
 
 
-# load_dotenv()
-
-
 # DATA_PATH = Path(os.environ["DATA_PATH"])
 # Define this relative to the path of this file
 ROOT_PATH = Path(__file__).parent.parent.parent.absolute()
@@ -48,7 +46,7 @@ state.PACKAGEDIR = ROOT_PATH
 
 
 print(f"Using data path: {DATA_PATH}")
-DOWNLOAD_DATA = False
+DOWNLOAD_DATA = True
 
 
 @dataclass
@@ -224,13 +222,14 @@ def get_pool_block_pairs(
     token_info = pl.scan_parquet(DATA_PATH / "pool_token_info.parquet")
 
     # Check if block_pool_metrics.parquet exists
-    block_pool_metrics_path = DATA_PATH / "block_pool_metrics/*.parquet"
+    block_pool_metrics_path = DATA_PATH / "pool_block_metrics/*.parquet"
     block_pool_metrics: Optional[pl.LazyFrame] = None
-    if block_pool_metrics_path.exists():
+
+    if len(glob(str(block_pool_metrics_path))) > 0:
         block_pool_metrics = pl.scan_parquet(block_pool_metrics_path)
     elif only_unprocessed:
         print(
-            "Warning: only_unprocessed is True, but block_pool_metrics.parquet doesn't exist. Returning all pool-block pairs."
+            "Warning: only_unprocessed is True, but pool_block_metrics/*.parquet doesn't exist. Returning all pool-block pairs."
         )
 
     # Start building the query
@@ -256,7 +255,7 @@ def get_pool_block_pairs(
                 right_on=["pool_address", "block_number"],
                 how="left",
             )
-            .filter(pl.col("pool_address").is_null())
+            .filter(pl.col("num_transactions").is_null())
             .select(["address", "block_number"])
         )
 
@@ -298,11 +297,11 @@ def do_swap(swap: dict, curr_price: float, pool: v3Pool, token_info: dict) -> fl
             "swapIn": input_amount,
             "as_of": swap["block_number"],
             "fees": True,
-            "providedPrice": curr_price * 2**96,
+            "providedPrice": curr_price,
         }
     )
 
-    return sqrt_price_next
+    return sqrt_price_next * 2**96
 
 
 def get_pool_block_count(*, only_unprocessed: bool) -> int:
@@ -311,12 +310,13 @@ def get_pool_block_count(*, only_unprocessed: bool) -> int:
     token_info = pl.scan_parquet(DATA_PATH / "pool_token_info.parquet")
 
     # Check if block_pool_metrics.parquet exists
-    block_pool_metrics_path = DATA_PATH / "block_pool_metrics/*.parquet"
+    block_pool_metrics_path = DATA_PATH / "pool_block_metrics/*.parquet"
     block_pool_metrics: Optional[pl.LazyFrame] = None
-    if block_pool_metrics_path.exists():
+
+    if len(glob(str(block_pool_metrics_path))) > 0:
         block_pool_metrics = pl.scan_parquet(block_pool_metrics_path)
     else:
-        print("block_pool_metrics.parquet not found. Proceeding without it.")
+        print("pool_block_metrics/*.parquet not found. Proceeding without it.")
 
     # Start building the query
     query = swap_counts.filter(
@@ -329,22 +329,24 @@ def get_pool_block_count(*, only_unprocessed: bool) -> int:
         right_on="pool",
     )
 
+    total_count = query.select(pl.len()).collect()[0, 0]
+
     if only_unprocessed and block_pool_metrics is not None:
         query = query.join(
             block_pool_metrics,
             left_on=["address", "block_number"],
             right_on=["pool_address", "block_number"],
             how="left",
-        ).filter(pl.col("pool_address").is_null())
+        ).filter(pl.col("num_transactions").is_null())
     elif only_unprocessed and block_pool_metrics is None:
         print(
-            "Warning: only_unprocessed is True, but block_pool_metrics.parquet doesn't exist. Returning all pool-block pairs."
+            "Warning: only_unprocessed is True, but pool_block_metrics/*.parquet doesn't exist. Returning all pool-block pairs."
         )
 
     # Count the rows
-    result = query.select(pl.len()).collect()
+    remaining_count = query.select(pl.len()).collect()[0, 0]
 
-    return result[0, 0]
+    return remaining_count, total_count
 
 
 def set_metrics(blockpool_metric, field: str, prices: list, ordering: list):
@@ -671,12 +673,16 @@ if __name__ == "__main__":
     parser.add_argument("--n-cpus", type=int, default=1, help="Number of CPUs to use")
     args = parser.parse_args()
 
-    only_unprocessed = False
+    only_unprocessed = True
 
     print(f"Starting MEV Boost Data Metric Calculations with {args.n_cpus} CPUs")
 
-    n_pool_block_pairs = get_pool_block_count(only_unprocessed=only_unprocessed)
-    print(f"Processing {n_pool_block_pairs:,} pool-block pairs")
+    n_pool_block_pairs, total_pairs = get_pool_block_count(
+        only_unprocessed=only_unprocessed
+    )
+    print(
+        f"Processing {n_pool_block_pairs:,} pool-block pairs out of {total_pairs:,} (already processed)"
+    )
 
     mev_boost_values = get_mev_boost_values()
 
@@ -699,7 +705,7 @@ if __name__ == "__main__":
             mev_boost_values=mev_boost_values,
             only_unprocessed=only_unprocessed,
             pull_latest_data=DOWNLOAD_DATA,
-            reraise_exceptions=True,  # Set to True to debug
+            reraise_exceptions=False,  # Set to True to debug
         )
 
     if n_processes == 1:
