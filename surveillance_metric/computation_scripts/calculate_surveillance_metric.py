@@ -322,7 +322,7 @@ def do_swap(
     return sqrt_price_next_x96
 
 
-def get_pool_block_count(*, only_unprocessed: bool) -> int:
+def get_pool_block_count(*, only_unprocessed: bool) -> tuple[int, int]:
     # Load DataFrames lazily
     swap_counts = pl.scan_parquet(DATA_PATH / "swap_counts.parquet")
     token_info = pl.scan_parquet(DATA_PATH / "pool_token_info.parquet")
@@ -615,6 +615,8 @@ def run_metrics(
         #     print(f"I'm done after {i} pools")
         #     break
 
+        block_number = 0
+
         it.set_description(
             f"[{process_id}] ({offset}-{offset+limit}) Processing pool {pool_addr}"
         )
@@ -627,7 +629,7 @@ def run_metrics(
         # Reuse the same pool object if the address is the same
         try:
             if pool is None or pool_addr != pool.pool:
-                print(f"Downloading pool data for {pool_addr}, index {i}")
+                # print(f"Downloading pool data for {pool_addr}, index {i}")
                 pool = get_pool(pool_addr, update=pull_latest_data)
 
             # # Just so we can download all the data, we'll continue without doing any calculations
@@ -707,55 +709,116 @@ def run_metrics(
     it.close()
 
 
-if __name__ == "__main__":
-    # from dotenv import load_dotenv
+# if __name__ == "__main__":
+#     # from dotenv import load_dotenv
 
+#     load_dotenv()
+
+#     parser = argparse.ArgumentParser(description="Calculate MEV Boost Data Metrics")
+#     parser.add_argument("--n-cpus", type=int, default=1, help="Number of CPUs to use")
+#     args = parser.parse_args()
+
+#     only_unprocessed = True
+
+#     print(f"Starting MEV Boost Data Metric Calculations with {args.n_cpus} CPUs")
+
+#     n_pool_block_pairs, total_pairs = get_pool_block_count(
+#         only_unprocessed=only_unprocessed
+#     )
+#     print(
+#         f"Processing {n_pool_block_pairs:,} pool-block pairs out of {total_pairs:,} (already processed)"
+#     )
+
+#     mev_boost_values = get_mev_boost_values()
+
+#     token_info = get_token_info()
+#     print(f"Loaded {len(token_info):,} token info entries")
+
+#     n_processes = args.n_cpus
+
+#     # Calculate the chunk size
+#     chunk_size = n_pool_block_pairs // n_processes
+
+#     # Define a function to be mapped
+#     def run_chunk(i):
+#         offset = i * chunk_size
+#         run_metrics(
+#             limit=chunk_size,
+#             offset=offset,
+#             process_id=i,
+#             all_token_info=token_info,
+#             mev_boost_values=mev_boost_values,
+#             only_unprocessed=only_unprocessed,
+#             pull_latest_data=True,
+#             reraise_exceptions=False,  # Set to True to debug
+#         )
+
+#     if n_processes == 1:
+#         run_chunk(0)
+#     else:
+#         # Create a pool of workers and map the function across the input values
+#         with Pool(n_processes) as pool:
+#             pool.map(run_chunk, range(n_processes))
+
+#     print("All processes completed.")
+
+
+if __name__ == "__main__":
     load_dotenv()
 
     parser = argparse.ArgumentParser(description="Calculate MEV Boost Data Metrics")
-    parser.add_argument("--n-cpus", type=int, default=1, help="Number of CPUs to use")
+    parser.add_argument(
+        "--n-partitions", type=int, required=True, help="Total number of partitions"
+    )
+    parser.add_argument(
+        "--partition-index",
+        type=int,
+        required=True,
+        help="Index of this partition (0-based)",
+    )
     args = parser.parse_args()
+
+    if args.partition_index < 0 or args.partition_index >= args.n_partitions:
+        raise ValueError("partition-index must be between 0 and n-partitions - 1")
 
     only_unprocessed = True
 
-    print(f"Starting MEV Boost Data Metric Calculations with {args.n_cpus} CPUs")
+    print(
+        f"Starting MEV Boost Data Metric Calculations for partition {args.partition_index + 1} of {args.n_partitions}"
+    )
 
     n_pool_block_pairs, total_pairs = get_pool_block_count(
         only_unprocessed=only_unprocessed
     )
     print(
-        f"Processing {n_pool_block_pairs:,} pool-block pairs out of {total_pairs:,} (already processed)"
+        f"Total pool-block pairs: {n_pool_block_pairs:,} out of {total_pairs:,} (already processed)"
     )
-
-    mev_boost_values = get_mev_boost_values()
 
     token_info = get_token_info()
     print(f"Loaded {len(token_info):,} token info entries")
 
-    n_processes = args.n_cpus
+    # Calculate the chunk size and offset for this partition
+    chunk_size = n_pool_block_pairs // args.n_partitions
+    remainder = n_pool_block_pairs % args.n_partitions
 
-    # Calculate the chunk size
-    chunk_size = n_pool_block_pairs // n_processes
-
-    # Define a function to be mapped
-    def run_chunk(i):
-        offset = i * chunk_size
-        run_metrics(
-            limit=chunk_size,
-            offset=offset,
-            process_id=i,
-            all_token_info=token_info,
-            mev_boost_values=mev_boost_values,
-            only_unprocessed=only_unprocessed,
-            pull_latest_data=True,
-            reraise_exceptions=False,  # Set to True to debug
-        )
-
-    if n_processes == 1:
-        run_chunk(0)
+    # Distribute the remainder across partitions
+    if args.partition_index < remainder:
+        chunk_size += 1
+        offset = args.partition_index * chunk_size
     else:
-        # Create a pool of workers and map the function across the input values
-        with Pool(n_processes) as pool:
-            pool.map(run_chunk, range(n_processes))
+        offset = (args.partition_index * chunk_size) + remainder
 
-    print("All processes completed.")
+    print(f"Processing chunk size: {chunk_size}, offset: {offset}")
+
+    run_metrics(
+        limit=chunk_size,
+        offset=offset,
+        process_id=args.partition_index,
+        all_token_info=token_info,
+        mev_boost_values=get_mev_boost_values(),
+        only_unprocessed=only_unprocessed,
+        pull_latest_data=True,
+        reraise_exceptions=False,  # Set to True to debug
+    )
+
+    print(f"Partition {args.partition_index + 1} of {args.n_partitions} completed.")
