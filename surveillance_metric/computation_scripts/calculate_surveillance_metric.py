@@ -46,7 +46,6 @@ state.PACKAGEDIR = ROOT_PATH
 
 
 print(f"Using data path: {DATA_PATH}")
-DOWNLOAD_DATA = True
 
 
 @dataclass
@@ -260,7 +259,22 @@ def get_pool_block_pairs(
         )
 
     # Apply ordering, limit, and offset
-    query = query.sort(["address", "block_number"]).slice(offset, limit)
+    # query = query.sort(["address", "block_number"]).slice(offset, limit)
+
+    # Count unique block numbers for each address
+    address_block_counts = query.group_by("address").agg(
+        pl.col("block_number").n_unique().alias("unique_block_count")
+    )
+
+    # Join the counts back to the original query
+    query = query.join(address_block_counts, on="address", how="left")
+
+    # Apply ordering (by unique block count descending, then address, then block number),
+    # limit, and offset
+    query = query.sort(
+        ["unique_block_count", "address", "block_number"],
+        descending=[True, False, False],
+    ).slice(offset, limit)
 
     # Collect the results
     return query.collect()
@@ -282,7 +296,9 @@ def get_pool(address, update=False):
     )
 
 
-def do_swap(swap: dict, curr_price: float, pool: v3Pool, token_info: dict) -> float:
+def do_swap(
+    swap: dict, curr_sqrt_price_x96: float, pool: v3Pool, token_info: dict
+) -> float:
     # bp()
     token_in = (
         token_info["token0"] if float(swap["amount0"]) > 0 else token_info["token1"]
@@ -297,14 +313,16 @@ def do_swap(swap: dict, curr_price: float, pool: v3Pool, token_info: dict) -> fl
             "swapIn": input_amount,
             "as_of": swap["block_number"],
             "fees": True,
-            "providedPrice": curr_price,
+            "providedPrice": curr_sqrt_price_x96,
         }
     )
 
-    return sqrt_price_next * 2**96
+    sqrt_price_next_x96 = sqrt_price_next * 2**96
+
+    return sqrt_price_next_x96
 
 
-def get_pool_block_count(*, only_unprocessed: bool) -> int:
+def get_pool_block_count(*, only_unprocessed: bool) -> tuple[int, int]:
     # Load DataFrames lazily
     swap_counts = pl.scan_parquet(DATA_PATH / "swap_counts.parquet")
     token_info = pl.scan_parquet(DATA_PATH / "pool_token_info.parquet")
@@ -365,14 +383,17 @@ def run_swap_order(
 ):
     prices = []
     ordering = []
-    curr_price_sqrt: float = pool.getPriceAt(block_number)
+    curr_price_sqrt_x96: float = pool.getPriceAt(block_number)
+    # curr_price_sqrt = curr_price_sqrt_x96 / 2**96
 
     for swap in swaps:
-        sqrt_price_next = do_swap(swap, curr_price_sqrt, pool, token_info)
+        sqrt_price_next_x96 = do_swap(swap, curr_price_sqrt_x96, pool, token_info)
+        sqrt_price_next = sqrt_price_next_x96 / 2**96
 
         prices.append(get_price(sqrt_price_next, token_info))
         ordering.append(f"{swap['transaction_index']:03}_{swap['log_index']:03}")
-        curr_price_sqrt = sqrt_price_next
+        # curr_price_sqrt = sqrt_price_next
+        curr_price_sqrt_x96 = sqrt_price_next_x96
 
     return prices, ordering
 
@@ -384,6 +405,7 @@ def realized_measurement(
     blockpool_metric: BlockPoolMetrics,
     token_info: Dict[str, Any],
 ):
+
     # Convert Polars DataFrame to an iterator of named tuples
     swap_iterator: Iterator[dict] = swaps.iter_rows(named=True)
 
@@ -582,12 +604,24 @@ def run_metrics(
     successes = 0
     buffer = []
 
-    for (pool_addr,), group in pool_block_pairs.group_by(
-        "address", maintain_order=True
+    for i, ((pool_addr,), group) in enumerate(
+        pool_block_pairs.group_by("address", maintain_order=True)
     ):
+
+        # if i < 400:
+        #     continue
+
+        # if i >= 500:
+        #     print(f"I'm done after {i} pools")
+        #     break
+
+        block_number = 0
+
         it.set_description(
             f"[{process_id}] ({offset}-{offset+limit}) Processing pool {pool_addr}"
         )
+
+        # bp()
 
         if pool_addr not in all_token_info:
             continue
@@ -595,7 +629,11 @@ def run_metrics(
         # Reuse the same pool object if the address is the same
         try:
             if pool is None or pool_addr != pool.pool:
+                # print(f"Downloading pool data for {pool_addr}, index {i}")
                 pool = get_pool(pool_addr, update=pull_latest_data)
+
+            # # Just so we can download all the data, we'll continue without doing any calculations
+            # continue
 
             min_block, max_block = get_min_max_block(group)
             swaps_for_pool = get_swaps_for_address(
@@ -604,7 +642,8 @@ def run_metrics(
 
             token_info = all_token_info[pool_addr]
 
-            for block_number in group["block_number"].unique():
+            # for block_number in group["block_number"].unique():
+            for block_number in swaps_for_pool["block_number"].unique():
                 block_number = int(block_number)
                 it.set_postfix(errors=errors, successes=successes)
                 it.update(1)
@@ -613,10 +652,16 @@ def run_metrics(
                     pl.col("block_number") == block_number
                 ).sort("transaction_index")
 
+                # bp()
+
                 if swaps.height == 0:
                     continue
 
-                curr_price_sqrt = pool.getPriceAt(block_number)
+                # This is sqrt_price_x96 format
+                curr_price_sqrt_x96 = pool.getPriceAt(block_number)
+                curr_price_sqrt = curr_price_sqrt_x96 / 2**96
+
+                # bp()
 
                 blockpool_metric = BlockPoolMetrics(
                     block_number=block_number,
@@ -664,55 +709,116 @@ def run_metrics(
     it.close()
 
 
-if __name__ == "__main__":
-    # from dotenv import load_dotenv
+# if __name__ == "__main__":
+#     # from dotenv import load_dotenv
 
+#     load_dotenv()
+
+#     parser = argparse.ArgumentParser(description="Calculate MEV Boost Data Metrics")
+#     parser.add_argument("--n-cpus", type=int, default=1, help="Number of CPUs to use")
+#     args = parser.parse_args()
+
+#     only_unprocessed = True
+
+#     print(f"Starting MEV Boost Data Metric Calculations with {args.n_cpus} CPUs")
+
+#     n_pool_block_pairs, total_pairs = get_pool_block_count(
+#         only_unprocessed=only_unprocessed
+#     )
+#     print(
+#         f"Processing {n_pool_block_pairs:,} pool-block pairs out of {total_pairs:,} (already processed)"
+#     )
+
+#     mev_boost_values = get_mev_boost_values()
+
+#     token_info = get_token_info()
+#     print(f"Loaded {len(token_info):,} token info entries")
+
+#     n_processes = args.n_cpus
+
+#     # Calculate the chunk size
+#     chunk_size = n_pool_block_pairs // n_processes
+
+#     # Define a function to be mapped
+#     def run_chunk(i):
+#         offset = i * chunk_size
+#         run_metrics(
+#             limit=chunk_size,
+#             offset=offset,
+#             process_id=i,
+#             all_token_info=token_info,
+#             mev_boost_values=mev_boost_values,
+#             only_unprocessed=only_unprocessed,
+#             pull_latest_data=True,
+#             reraise_exceptions=False,  # Set to True to debug
+#         )
+
+#     if n_processes == 1:
+#         run_chunk(0)
+#     else:
+#         # Create a pool of workers and map the function across the input values
+#         with Pool(n_processes) as pool:
+#             pool.map(run_chunk, range(n_processes))
+
+#     print("All processes completed.")
+
+
+if __name__ == "__main__":
     load_dotenv()
 
     parser = argparse.ArgumentParser(description="Calculate MEV Boost Data Metrics")
-    parser.add_argument("--n-cpus", type=int, default=1, help="Number of CPUs to use")
+    parser.add_argument(
+        "--n-partitions", type=int, required=True, help="Total number of partitions"
+    )
+    parser.add_argument(
+        "--partition-index",
+        type=int,
+        required=True,
+        help="Index of this partition (0-based)",
+    )
     args = parser.parse_args()
+
+    if args.partition_index < 0 or args.partition_index >= args.n_partitions:
+        raise ValueError("partition-index must be between 0 and n-partitions - 1")
 
     only_unprocessed = True
 
-    print(f"Starting MEV Boost Data Metric Calculations with {args.n_cpus} CPUs")
+    print(
+        f"Starting MEV Boost Data Metric Calculations for partition {args.partition_index + 1} of {args.n_partitions}"
+    )
 
     n_pool_block_pairs, total_pairs = get_pool_block_count(
         only_unprocessed=only_unprocessed
     )
     print(
-        f"Processing {n_pool_block_pairs:,} pool-block pairs out of {total_pairs:,} (already processed)"
+        f"Total pool-block pairs: {n_pool_block_pairs:,} out of {total_pairs:,} (already processed)"
     )
-
-    mev_boost_values = get_mev_boost_values()
 
     token_info = get_token_info()
     print(f"Loaded {len(token_info):,} token info entries")
 
-    n_processes = args.n_cpus
+    # Calculate the chunk size and offset for this partition
+    chunk_size = n_pool_block_pairs // args.n_partitions
+    remainder = n_pool_block_pairs % args.n_partitions
 
-    # Calculate the chunk size
-    chunk_size = n_pool_block_pairs // n_processes
-
-    # Define a function to be mapped
-    def run_chunk(i):
-        offset = i * chunk_size
-        run_metrics(
-            limit=chunk_size,
-            offset=offset,
-            process_id=i,
-            all_token_info=token_info,
-            mev_boost_values=mev_boost_values,
-            only_unprocessed=only_unprocessed,
-            pull_latest_data=DOWNLOAD_DATA,
-            reraise_exceptions=False,  # Set to True to debug
-        )
-
-    if n_processes == 1:
-        run_chunk(0)
+    # Distribute the remainder across partitions
+    if args.partition_index < remainder:
+        chunk_size += 1
+        offset = args.partition_index * chunk_size
     else:
-        # Create a pool of workers and map the function across the input values
-        with Pool(n_processes) as pool:
-            pool.map(run_chunk, range(n_processes))
+        offset = (args.partition_index * chunk_size) + remainder
 
-    print("All processes completed.")
+    print(f"Processing chunk size: {chunk_size}, offset: {offset}")
+
+    run_metrics(
+        limit=chunk_size,
+        offset=offset,
+        process_id=args.partition_index,
+        all_token_info=token_info,
+        mev_boost_values=get_mev_boost_values(),
+        only_unprocessed=only_unprocessed,
+        pull_latest_data=True,
+        reraise_exceptions=False,  # Set to True to debug
+    )
+
+    print(f"Partition {args.partition_index + 1} of {args.n_partitions} completed.")
