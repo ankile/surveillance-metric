@@ -17,6 +17,8 @@ import polars as pl
 ROOT_PATH = Path(__file__).parent.parent.parent.absolute()
 DATA_PATH = ROOT_PATH / "data_original"
 
+print(f"ROOT_PATH: {ROOT_PATH}\nDATA_PATH: {DATA_PATH}")
+
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 
@@ -91,17 +93,17 @@ class BlockPoolMetrics:
 
 def get_swaps_for_address(address: str, min_block: int, max_block: int) -> pl.DataFrame:
     # Create a lazy frame from all parquet files
-    df = pl.scan_parquet(DATA_PATH / "swaps" / "*.parquet")
-
-    # Apply filters
-    filtered_df = df.filter(
-        (pl.col("block_number") >= min_block)
-        & (pl.col("block_number") <= max_block)
-        & (pl.col("address") == address)
+    df = (
+        pl.scan_parquet(DATA_PATH / "swaps", hive_partitioning=True)
+        .filter((pl.col("address") == address))
+        .filter(
+            (pl.col("block_number") >= min_block)
+            & (pl.col("block_number") <= max_block)
+        )
     )
 
     # Collect and return the result
-    return filtered_df.collect().to_pandas()
+    return df.collect().to_pandas()
 
 
 def get_token_info():
@@ -145,14 +147,14 @@ def get_pool_block_pairs(*, limit, offset, only_unprocessed) -> pd.DataFrame:
     token_info = pl.scan_parquet(DATA_PATH / "pool_token_info.parquet")
 
     # Check if block_pool_metrics.parquet exists
-    block_pool_metrics_path = DATA_PATH / "pool_block_metrics_original/*.parquet"
+    block_pool_metrics_path = DATA_PATH / "pool_block_metrics/*.parquet"
     block_pool_metrics: Optional[pl.LazyFrame] = None
 
     if len(glob(str(block_pool_metrics_path))) > 0:
         block_pool_metrics = pl.scan_parquet(block_pool_metrics_path)
     elif only_unprocessed:
         print(
-            "Warning: only_unprocessed is True, but pool_block_metrics_original/*.parquet doesn't exist. Returning all pool-block pairs."
+            "Warning: only_unprocessed is True, but pool_block_metrics/*.parquet doesn't exist. Returning all pool-block pairs."
         )
 
     # Start building the query
@@ -196,8 +198,8 @@ def get_pool_block_pairs(*, limit, offset, only_unprocessed) -> pd.DataFrame:
     # Apply ordering (by unique block count descending, then address, then block number),
     # limit, and offset
     query = query.sort(
-        ["unique_block_count", "address", "block_number"],
-        descending=[True, False, False],
+        ["address", "block_number"],
+        descending=[False, False],
     ).slice(offset, limit)
 
     # Collect the results
@@ -262,13 +264,13 @@ def get_pool_block_count(*, only_unprocessed: bool) -> tuple[int, int]:
     token_info = pl.scan_parquet(DATA_PATH / "pool_token_info.parquet")
 
     # Check if block_pool_metrics.parquet exists
-    block_pool_metrics_path = DATA_PATH / "pool_block_metrics_original/*.parquet"
+    block_pool_metrics_path = DATA_PATH / "pool_block_metrics/*.parquet"
     block_pool_metrics: Optional[pl.LazyFrame] = None
 
     if len(glob(str(block_pool_metrics_path))) > 0:
         block_pool_metrics = pl.scan_parquet(block_pool_metrics_path)
     else:
-        print("pool_block_metrics_original/*.parquet not found. Proceeding without it.")
+        print("pool_block_metrics/*.parquet not found. Proceeding without it.")
 
     # Start building the query
     query = swap_counts.filter(
@@ -292,7 +294,7 @@ def get_pool_block_count(*, only_unprocessed: bool) -> tuple[int, int]:
         ).filter(pl.col("num_transactions").is_null())
     elif only_unprocessed and block_pool_metrics is None:
         print(
-            "Warning: only_unprocessed is True, but pool_block_metrics_original/*.parquet doesn't exist. Returning all pool-block pairs."
+            "Warning: only_unprocessed is True, but pool_block_metrics/*.parquet doesn't exist. Returning all pool-block pairs."
         )
 
     # Count the rows
@@ -484,7 +486,13 @@ def copy_over(blockpool_metric: BlockPoolMetrics, to: list[str]):
 
 
 def run_metrics(
-    limit, offset, process_id, token_info, mev_boost_values, only_unprocessed
+    limit,
+    offset,
+    process_id,
+    token_info,
+    mev_boost_values,
+    only_unprocessed,
+    t_star_max_swaps,
 ):
 
     def write_buffer():
@@ -499,8 +507,8 @@ def run_metrics(
 
     output_file = (
         DATA_PATH
-        / "pool_block_metrics_original"
-        / f"block_pool_metrics_{offset}-{offset+limit}.parquet"
+        / "pool_block_metrics"
+        / f"block_pool_metrics_{offset}-{offset+limit}_{datetime.now()}.parquet"
     )
 
     # Ensure the path exists
@@ -514,6 +522,7 @@ def run_metrics(
         total=pool_block_pairs.shape[0],
         position=process_id,
         desc=f"[{process_id}] ({offset}-{offset+limit})",
+        smoothing=0,
     )
     pool = None
 
@@ -579,7 +588,9 @@ def run_metrics(
                     volume_heuristic(
                         pool, swaps, block_number, blockpool_metric, token_info
                     )
-                    tstar(pool, swaps, block_number, blockpool_metric, token_info)
+
+                    if swaps.shape[0] <= t_star_max_swaps:
+                        tstar(pool, swaps, block_number, blockpool_metric, token_info)
                 else:
                     copy_over(blockpool_metric, to=["volume_heur", "tstar"])
 
@@ -662,6 +673,7 @@ if __name__ == "__main__":
         token_info=token_info,
         mev_boost_values=mev_boost_values,
         only_unprocessed=only_unprocessed,
+        t_star_max_swaps=4,
         # pull_latest_data=True,
         # reraise_exceptions=False,  # Set to True to debug
     )

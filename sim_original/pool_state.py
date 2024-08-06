@@ -544,9 +544,9 @@ class v3Pool:
         # swaps = pd.read_sql(q, self.engine)
         # bp()
         swaps = (
-            pl.scan_parquet(DATA_BASE_DIR / "swaps/*.parquet")
+            pl.scan_parquet(DATA_BASE_DIR / "swaps", hive_partitioning=True)
             .filter(pl.col("address") == self.pool)
-            .sort(by=["block_number", "transaction_index", "log_index"])
+            # .sort(by=["block_number", "transaction_index", "log_index"])
             .collect()
             .to_pandas()
         )
@@ -836,10 +836,16 @@ class v3Pool:
         swap_df = pd.DataFrame(x, columns=["ticks"])
         swap_df["liquidity"] = y
 
+        # # fix floating point liquidity errors
+        # swap_df.loc[
+        #     swap_df["liquidity"].apply(lambda x: math.isclose(x, 0)), "liquidity"
+        # ] = 0
         # fix floating point liquidity errors
-        swap_df.loc[
-            swap_df["liquidity"].apply(lambda x: math.isclose(x, 0)), "liquidity"
-        ] = 0
+        rel_tol = 1e-9  # default relative tolerance for math.isclose
+        abs_tol = 0.0  # default absolute tolerance for math.isclose
+
+        mask = np.isclose(swap_df["liquidity"], 0, rtol=rel_tol, atol=abs_tol)
+        swap_df.loc[mask, "liquidity"] = 0
         swap_df = swap_df[swap_df["liquidity"] >= 0]
 
         in_range = (self.getTickAt(as_of) // self.ts) * self.ts
@@ -871,9 +877,16 @@ class v3Pool:
         swap_df["liquidity"] = y
 
         # fix floating point liquidity errors
-        swap_df.loc[
-            swap_df["liquidity"].apply(lambda x: math.isclose(x, 0)), "liquidity"
-        ] = 0
+        # swap_df.loc[
+        #     swap_df["liquidity"].apply(lambda x: math.isclose(x, 0)), "liquidity"
+        # ] = 0
+        # fix floating point liquidity errors
+        rel_tol = 1e-9  # default relative tolerance for math.isclose
+        abs_tol = 0.0  # default absolute tolerance for math.isclose
+
+        mask = np.isclose(swap_df["liquidity"], 0, rtol=rel_tol, atol=abs_tol)
+        swap_df.loc[mask, "liquidity"] = 0
+
         swap_df = swap_df[swap_df["liquidity"] >= 0]
 
         swap_df["ts"] = self.ts
