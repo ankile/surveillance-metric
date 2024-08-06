@@ -23,5 +23,4 @@ stack-data==0.6.3
 tqdm==4.66.5
 traitlets==5.14.3
 urllib3==2.2.2
-v3_polars==0.1
 wcwidth==0.2.13
