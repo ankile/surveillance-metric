@@ -145,14 +145,14 @@ def get_pool_block_pairs(*, limit, offset, only_unprocessed) -> pd.DataFrame:
     token_info = pl.scan_parquet(DATA_PATH / "pool_token_info.parquet")
 
     # Check if block_pool_metrics.parquet exists
-    block_pool_metrics_path = DATA_PATH / "pool_block_metrics/*.parquet"
+    block_pool_metrics_path = DATA_PATH / "pool_block_metrics_original/*.parquet"
     block_pool_metrics: Optional[pl.LazyFrame] = None
 
     if len(glob(str(block_pool_metrics_path))) > 0:
         block_pool_metrics = pl.scan_parquet(block_pool_metrics_path)
     elif only_unprocessed:
         print(
-            "Warning: only_unprocessed is True, but pool_block_metrics/*.parquet doesn't exist. Returning all pool-block pairs."
+            "Warning: only_unprocessed is True, but pool_block_metrics_original/*.parquet doesn't exist. Returning all pool-block pairs."
         )
 
     # Start building the query
@@ -262,13 +262,13 @@ def get_pool_block_count(*, only_unprocessed: bool) -> tuple[int, int]:
     token_info = pl.scan_parquet(DATA_PATH / "pool_token_info.parquet")
 
     # Check if block_pool_metrics.parquet exists
-    block_pool_metrics_path = DATA_PATH / "pool_block_metrics/*.parquet"
+    block_pool_metrics_path = DATA_PATH / "pool_block_metrics_original/*.parquet"
     block_pool_metrics: Optional[pl.LazyFrame] = None
 
     if len(glob(str(block_pool_metrics_path))) > 0:
         block_pool_metrics = pl.scan_parquet(block_pool_metrics_path)
     else:
-        print("pool_block_metrics/*.parquet not found. Proceeding without it.")
+        print("pool_block_metrics_original/*.parquet not found. Proceeding without it.")
 
     # Start building the query
     query = swap_counts.filter(
@@ -292,7 +292,7 @@ def get_pool_block_count(*, only_unprocessed: bool) -> tuple[int, int]:
         ).filter(pl.col("num_transactions").is_null())
     elif only_unprocessed and block_pool_metrics is None:
         print(
-            "Warning: only_unprocessed is True, but pool_block_metrics/*.parquet doesn't exist. Returning all pool-block pairs."
+            "Warning: only_unprocessed is True, but pool_block_metrics_original/*.parquet doesn't exist. Returning all pool-block pairs."
         )
 
     # Count the rows
@@ -515,12 +515,13 @@ def run_metrics(
         position=process_id,
         desc=f"[{process_id}] ({offset}-{offset+limit})",
     )
-    pool = get_pool(pool_block_pairs.address[0])
+    pool = None
 
     program_start = datetime.now()
 
     errors = 0
     successes = 0
+    skipped_bc_empty = 0
     buffer = []
 
     for pool_addr, df in pool_block_pairs.groupby("address"):
@@ -531,24 +532,29 @@ def run_metrics(
         if pool_addr not in token_info:
             continue
 
-        if pool_addr != pool.pool:
-            pool = get_pool(pool_addr)
+        try:
+            if pool is None or pool_addr != pool.pool:
+                pool = get_pool(pool_addr)
 
-        swaps_for_pool = get_swaps_for_address(
-            pool_addr, df.block_number.min(), df.block_number.max()
-        )
+            swaps_for_pool = get_swaps_for_address(
+                pool_addr, df.block_number.min(), df.block_number.max()
+            )
 
-        for block_number in df.block_number.unique():
-            block_number = int(block_number)
-            it.set_postfix(errors=errors, successes=successes)
-            it.update(1)
+            for block_number in df.block_number.unique():
+                block_number = int(block_number)
+                it.set_postfix(
+                    errors=errors,
+                    successes=successes,
+                    skipped_bc_empty=skipped_bc_empty,
+                )
+                it.update(1)
 
-            try:
                 swaps = swaps_for_pool[
                     swaps_for_pool.block_number == block_number
                 ].sort_values("transaction_index")
 
                 if swaps.shape[0] == 0:
+                    skipped_bc_empty += 1
                     continue
 
                 curr_price_sqrt = pool.getPriceAt(block_number)
@@ -585,32 +591,43 @@ def run_metrics(
 
                 successes += 1
 
-            except AssertionError as e:
-                with open(f"output/error-{program_start}.log", "a") as f:
-                    f.write(
-                        f"Assertion error processing block {block_number} for pool {pool_addr}: {e}\n"
-                    )
-                continue
-
-            except Exception as e:
-                # bp()
-                raise e
-                errors += 1
-                with open(f"output/error-{program_start}.log", "a") as f:
-                    f.write(
-                        f"Error processing block {block_number} for pool {pool_addr}: {e}\n"
-                    )
-                continue
+        except Exception as e:
+            errors += 1
+            with open(f"output/error-{program_start}.log", "a") as f:
+                f.write(
+                    f"Error processing block {block_number} for pool {pool_addr}: {e}\n"
+                )
+            continue
 
 
 if __name__ == "__main__":
+    # parser = argparse.ArgumentParser(description="Calculate MEV Boost Data Metrics")
+    # parser.add_argument("--n-cpus", type=int, default=1, help="Number of CPUs to use")
+    # args = parser.parse_args()
+
     parser = argparse.ArgumentParser(description="Calculate MEV Boost Data Metrics")
-    parser.add_argument("--n-cpus", type=int, default=1, help="Number of CPUs to use")
+    parser.add_argument(
+        "--n-partitions",
+        "-n",
+        type=int,
+        required=True,
+        help="Total number of partitions",
+    )
+    parser.add_argument(
+        "--partition-index",
+        "-i",
+        type=int,
+        required=True,
+        help="Index of this partition (0-based)",
+    )
     args = parser.parse_args()
 
     only_unprocessed = True
 
-    print(f"Starting MEV Boost Data Metric Calculations with {args.n_cpus} CPUs")
+    # print(f"Starting MEV Boost Data Metric Calculations with {args.n_cpus} CPUs")
+    print(
+        f"Starting MEV Boost Data Metric Calculations for partition {args.partition_index + 1} of {args.n_partitions}"
+    )
 
     n_pool_block_pairs, total_pairs = get_pool_block_count(
         only_unprocessed=only_unprocessed
@@ -620,30 +637,56 @@ if __name__ == "__main__":
     mev_boost_values = get_mev_boost_values()
     token_info = get_token_info()
 
-    n_processes = args.n_cpus
+    # n_processes = args.n_cpus
 
-    # Calculate the chunk size
-    chunk_size = n_pool_block_pairs // n_processes
+    # # Calculate the chunk size
+    # chunk_size = n_pool_block_pairs // n_processes
 
-    # Define a function to be mapped
-    def run_chunk(i):
-        offset = i * chunk_size
-        run_metrics(
-            limit=chunk_size,
-            offset=offset,
-            process_id=i,
-            token_info=token_info,
-            mev_boost_values=mev_boost_values,
-            only_unprocessed=only_unprocessed,
-            # pull_latest_data=True,
-            # reraise_exceptions=False,  # Set to True to debug
-        )
+    # Calculate the chunk size and offset for this partition
+    chunk_size = n_pool_block_pairs // args.n_partitions
+    remainder = n_pool_block_pairs % args.n_partitions
 
-    if n_processes == 1:
-        run_chunk(0)
+    # Distribute the remainder across partitions
+    if args.partition_index < remainder:
+        chunk_size += 1
+        offset = args.partition_index * chunk_size
     else:
-        # Create a pool of workers and map the function across the input values
-        with Pool(n_processes) as pool:
-            pool.map(run_chunk, range(n_processes))
+        offset = (args.partition_index * chunk_size) + remainder
 
-    print("All processes completed.")
+    print(f"Processing chunk size: {chunk_size}, offset: {offset}")
+
+    run_metrics(
+        limit=chunk_size,
+        offset=offset,
+        process_id=args.partition_index,
+        token_info=token_info,
+        mev_boost_values=mev_boost_values,
+        only_unprocessed=only_unprocessed,
+        # pull_latest_data=True,
+        # reraise_exceptions=False,  # Set to True to debug
+    )
+
+    print(f"Partition {args.partition_index + 1} of {args.n_partitions} completed.")
+
+    # # Define a function to be mapped
+    # def run_chunk(i):
+    #     offset = i * chunk_size
+    #     run_metrics(
+    #         limit=chunk_size,
+    #         offset=offset,
+    #         process_id=i,
+    #         token_info=token_info,
+    #         mev_boost_values=mev_boost_values,
+    #         only_unprocessed=only_unprocessed,
+    #         # pull_latest_data=True,
+    #         # reraise_exceptions=False,  # Set to True to debug
+    #     )
+
+    # if n_processes == 1:
+    #     run_chunk(0)
+    # else:
+    #     # Create a pool of workers and map the function across the input values
+    #     with Pool(n_processes) as pool:
+    #         pool.map(run_chunk, range(n_processes))
+
+    # print("All processes completed.")
