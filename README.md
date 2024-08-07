@@ -35,10 +35,7 @@ pip install -e .
 ```
 
 
-## Data
-
-
-### Raw data
+## Download input data data
 
 We have aggregated raw data from different sources to enable the analyses herein, all intended for academic use:
 
@@ -48,15 +45,30 @@ We have aggregated raw data from different sources to enable the analyses herein
 To download all the data used in this study, run the following commands in the root of the repository
 
 ```bash
-curl -O https://surveillance-metric.s3.amazonaws.com/uniswap-raw-data.zip
-unzip uniswap-raw-data.zip
-rm uniswap-raw-data.zip
+curl -O https://surveillance-metric.s3.amazonaws.com/input_data.zip
+unzip input_data.zip
+rm input_data.zip
 ```
 
-This is the necessary data to be able to run the code that calculates the metric over the blockchain data. If you only want to look at the result after running the analyses, download the following data as well.
+You should now have a folder in the root of the project folder called `input_data` with several more folders inside.
+
+This is the necessary data to run the code that calculates the metric using blockchain data. If you only want to look at the result after running the analyses, rather download the following data.
 
 
-### Metric calculation data
+
+## Calculate the metrics
+
+To run the code that populates the data frames that we later run analyses on, run
+
+```bash
+python -m surveillance_metric.calculate_surveillance_metric
+```
+
+This assumes the
+
+
+
+## Download metric calculation output data
 
 To download the output from running the metric calculation scr
 
@@ -68,12 +80,5 @@ rm metric_calculation_output.zip
 ```
 
 
-## Calculate the metrics
-
-To run the code that populates the dataframes that we later run analyses on, run
-
-```bash
-python -m surveillance_metric.computation_scripts.calculate_surveillance_metric
-```
 
 ## Run the analyses on the metrics
