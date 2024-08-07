@@ -4,15 +4,9 @@ This repository contains the code to download the raw blockchain data and run th
 
 ## Code
 
-Navigate to where you want to house this code and run this command
+This readme assumes that the folder containing the code has been downloaded and unzipped.
 
-```bash
-git clone --recursive git@github.com:ankile/surveillance-metric.git
-```
-
-_Note: The `recursive` option is important to ensure that you get the code that runs the Uniswap simulation_
-
-Navigate into the repo with
+Ensure you've avigated into the repo with
 
 ```bash
 cd surveillance-metric
@@ -27,13 +21,14 @@ python -m venv venv
 source venv/bin/activate
 ```
 
-Now install the simulator code
+You can alternatively use, e.g., `conda` if you have that installed
 
 ```bash
-pip install -e uniswap-v3-sim
+conda create -n defi python=3.11 -y
+conda activate defi
 ```
 
-Finally, install this package and its dependencies
+Then, install this package and its dependencies
 
 ```bash
 pip install -e .
@@ -45,9 +40,12 @@ pip install -e .
 
 ### Raw data
 
-We have aggregated raw data from different sources to enable the analyses herein. Most of the Uniswap data is from the service Allium, MEV Boost data is from an open repo: .
+We have aggregated raw data from different sources to enable the analyses herein, all intended for academic use:
 
-To download the raw data, run the following commands in the root of the repository (planning to add the opportunity to specify a different path if that's nice to have)
+- Uniswap data is from the service Allium: [https://app.allium.so/](https://app.allium.so/)
+- MEV Boost data is from an open repo: [https://mevboost.pics/data.html](https://mevboost.pics/data.html)
+
+To download all the data used in this study, run the following commands in the root of the repository
 
 ```bash
 curl -O https://surveillance-metric.s3.amazonaws.com/uniswap-raw-data.zip
@@ -60,12 +58,13 @@ This is the necessary data to be able to run the code that calculates the metric
 
 ### Metric calculation data
 
-_NOTE: This file does not exist yet!_
+To download the output from running the metric calculation scr
+
 
 ```bash
-curl -O https://surveillance-metric.s3.amazonaws.com/uniswap-surveillance-metric-v1.zip
-unzip uniswap-surveillance-metric-v1.zip
-rm uniswap-surveillance-metric-v1.zip
+curl -O https://surveillance-metric.s3.amazonaws.com/metric_calculation_output.zip
+unzip metric_calculation_output.zip
+rm metric_calculation_output.zip
 ```
 
 
