@@ -648,11 +648,6 @@ if __name__ == "__main__":
     mev_boost_values = get_mev_boost_values()
     token_info = get_token_info()
 
-    # n_processes = args.n_cpus
-
-    # # Calculate the chunk size
-    # chunk_size = n_pool_block_pairs // n_processes
-
     # Calculate the chunk size and offset for this partition
     chunk_size = n_pool_block_pairs // args.n_partitions
     remainder = n_pool_block_pairs % args.n_partitions
@@ -673,7 +668,7 @@ if __name__ == "__main__":
         token_info=token_info,
         mev_boost_values=mev_boost_values,
         only_unprocessed=only_unprocessed,
-        t_star_max_swaps=4,
+        t_star_max_swaps=0,
         # pull_latest_data=True,
         # reraise_exceptions=False,  # Set to True to debug
     )
