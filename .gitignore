@@ -105,3 +105,6 @@ data/
 output/
 data_original/
 *.zip
+*.err
+*.out
+*.egg-info
